@@ -1,0 +1,7 @@
+{
+  "pm_agent":        { "recent_outcomes": [], "runs": 0, "successes": 0, "rate": null },
+  "architect_agent": { "recent_outcomes": [], "runs": 0, "successes": 0, "rate": null },
+  "coding_agent":    { "recent_outcomes": [], "runs": 0, "successes": 0, "rate": null },
+  "testing_agent":   { "recent_outcomes": [], "runs": 0, "successes": 0, "rate": null },
+  "review_agent":    { "recent_outcomes": [], "runs": 0, "successes": 0, "rate": null }
+}
