@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "run_id": 1,
+    "timestamp": "2026-08-14T18:19:01.612671+00:00",
+    "task_id": "task_b66456",
+    "agent_rates": {
+      "pm_agent": 1.0,
+      "architect_agent": 1.0,
+      "coding_agent": 1.0,
+      "testing_agent": 1.0,
+      "review_agent": 1.0
+    },
+    "reflections_triggered": []
+  }
+]
