@@ -1,0 +1,40 @@
+{
+  "task_id": "task_001",
+  "feature_request": "Add rate limiting to the login endpoint so that a single IP cannot brute-force user credentials.",
+  "acceptance_criteria": [
+    "Max 5 login attempts per IP per 10 minutes",
+    "Returns HTTP 429 when limit exceeded",
+    "All existing login tests still pass"
+  ],
+  "scoped_files": [
+    "flaskbb/auth/views.py",
+    "flaskbb/utils/rate_limit.py"
+  ],
+  "status": "in_progress",
+  "current_agent": "testing_agent",
+  "plan": "Add an in-memory sliding-window rate limiter keyed by remote IP. Implement it as a Flask decorator in flaskbb/utils/rate_limit.py and apply it to the login POST handler in flaskbb/auth/views.py. Return HTTP 429 with a JSON error body when the limit is exceeded.",
+  "history": [
+    {
+      "agent": "pm_agent",
+      "output_summary": "3 acceptance criteria defined: attempt cap, 429 response, regression guard",
+      "timestamp": "2026-08-10T09:00:00Z",
+      "success": true
+    },
+    {
+      "agent": "architect_agent",
+      "output_summary": "plan written; scoped to flaskbb/auth/views.py and flaskbb/utils/rate_limit.py",
+      "timestamp": "2026-08-10T09:05:00Z",
+      "success": true
+    },
+    {
+      "agent": "coding_agent",
+      "output_summary": "rate_limit_login decorator added in utils/rate_limit.py; login view wrapped",
+      "timestamp": "2026-08-10T09:15:00Z",
+      "success": true
+    }
+  ],
+  "code_diff": "--- a/flaskbb/utils/rate_limit.py\n+++ b/flaskbb/utils/rate_limit.py\n@@ -0,0 +1,27 @@\n+\"\"\"\n+flaskbb/utils/rate_limit.py\n+\n+In-memory sliding-window rate limiter for the login endpoint.\n+Keyed by remote IP address. Not persistent across restarts.\n+\"\"\"\n+from collections import defaultdict\n+from functools import wraps\n+from time import time\n+\n+from flask import jsonify, request\n+\n+_attempts: dict = defaultdict(list)\n+LOGIN_LIMIT = 5\n+LOGIN_WINDOW = 600  # seconds (10 minutes)\n+\n+\n+def rate_limit_login(f):\n+    \"\"\"Decorator: block an IP after LOGIN_LIMIT attempts within LOGIN_WINDOW seconds.\"\"\"\n+    @wraps(f)\n+    def decorated(*args, **kwargs):\n+        ip = request.remote_addr\n+        now = time()\n+        # Evict timestamps outside the current window\n+        _attempts[ip] = [t for t in _attempts[ip] if now - t < LOGIN_WINDOW]\n+        if len(_attempts[ip]) >= LOGIN_LIMIT:\n+            return jsonify({\"error\": \"Too many login attempts. Try again later.\"}), 429\n+        _attempts[ip].append(now)\n+        return f(*args, **kwargs)\n+    return decorated\n--- a/flaskbb/auth/views.py\n+++ b/flaskbb/auth/views.py\n@@ -1,6 +1,8 @@\n from flask import Blueprint, flash, redirect, render_template, request, url_for\n from flask_login import login_user, logout_user\n+\n+from flaskbb.utils.rate_limit import rate_limit_login\n from flaskbb.auth.forms import LoginForm\n from flaskbb.user.models import User\n \n@@ -10,6 +12,7 @@ auth = Blueprint(\"auth\", __name__)\n \n @auth.route(\"/login\", methods=[\"GET\", \"POST\"])\n+@rate_limit_login\n def login():\n     form = LoginForm()\n     if form.validate_on_submit():\n",
+  "test_results": null,
+  "review_result": null,
+  "retry_count": 0
+}

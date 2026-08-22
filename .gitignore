@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 .env
 .venv/
@@ -6,3 +6,12 @@ venv/
 node_modules/
 .DS_Store
 *.log
+
+# Sample repo - cloned separately, not tracked in this repo
+sample_repo/flaskbb/
+
+# Dashboard task files - runtime artifacts, not source code
+dashboard/tasks/*.json
+
+# Pytest cache
+.pytest_cache/
