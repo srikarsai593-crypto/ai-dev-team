@@ -35,7 +35,61 @@ Review the code diff against the security checklist below. Return a structured J
 - Do NOT approve code that has high or critical findings.
 - Do NOT invent findings not evidenced in the diff.
 
-## Output Schema
+## Output Schema — Review Passed
+
+If no high/critical findings, output this JSON and nothing else:
+
+```json
+{
+  "task_id": "<string — copy from input>",
+  "feature_request": "<copy from input>",
+  "acceptance_criteria": "<copy from input>",
+  "scoped_files": "<copy from input>",
+  "status": "awaiting_human_approval",
+  "current_agent": "manager_agent",
+  "plan": "<copy from input>",
+  "history": "<copy full existing array, then append one new entry: {agent: review_agent, output_summary: review passed, timestamp: <ISO 8601 now>, success: true}>",
+  "code_diff": "<copy from input>",
+  "test_results": "<copy from input>",
+  "review_result": {
+    "passed": true,
+    "findings": []
+  },
+  "retry_count": "<copy from input>"
+}
+```
+
+## Output Schema — Review Failed
+
+If any finding has severity "high" or "critical", output this JSON and nothing else:
+
+```json
+{
+  "task_id": "<string — copy from input>",
+  "feature_request": "<copy from input>",
+  "acceptance_criteria": "<copy from input>",
+  "scoped_files": "<copy from input>",
+  "status": "needs_retry",
+  "current_agent": "coding_agent",
+  "plan": "<copy from input>",
+  "history": "<copy full existing array, then append one new entry: {agent: review_agent, output_summary: review rejected: <comma-separated checklist items>, timestamp: <ISO 8601 now>, success: false}>",
+  "code_diff": "<copy from input>",
+  "test_results": "<copy from input>",
+  "review_result": {
+    "passed": false,
+    "findings": [
+      {
+        "checklist_item": "<check name from table above>",
+        "file": "<file path>",
+        "line": "<line number or null>",
+        "severity": "high",
+        "description": "<what specifically is wrong>"
+      }
+    ]
+  },
+  "retry_count": "<copy from input>"
+}
+```
 
 ## Stub Reflection Rules
 <!-- Added by stub Reflection Agent — will be replaced by real LLM rewrite -->

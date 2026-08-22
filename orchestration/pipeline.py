@@ -89,8 +89,13 @@ def initialize_task(feature_request: str, task_id: str = None) -> dict:
     }
 
 
-def append_history(task: dict, agent: str, summary: str, success: bool) -> dict:
-    """Append a history entry to the task object."""
+def append_history(task: dict, agent: str, summary: str, success) -> dict:
+    """Append a history entry to the task object.
+    success must be True, False, or None (null in JSON).
+      True  — agent ran and succeeded
+      False — agent ran and its own work failed
+      None  — agent was blocked by upstream bad input (success: null in schema)
+    """
     task["history"].append({
         "agent": agent,
         "output_summary": summary,
@@ -144,31 +149,119 @@ def call_architect_agent(task: dict) -> dict:
     print("[architect_agent] STUB: scoping files and writing plan...")
     task["current_agent"] = "architect_agent"
 
-    # Stub: real FlaskBB file paths for auth/login area (most demo-relevant)
+    # Stub: real FlaskBB file paths that exist in sample_repo/flaskbb/
+    # (tests/unit/test_auth.py does NOT exist in FlaskBB's layout — removed)
     task["scoped_files"] = [
         "flaskbb/auth/views.py",
         "flaskbb/auth/forms.py",
         "flaskbb/extensions.py",
-        "tests/unit/test_auth.py",
     ]
     task["plan"] = (
         f"STUB PLAN: Implement '{task['feature_request']}' by modifying "
         "flaskbb/auth/views.py (add rate limiting to login view), "
         "flaskbb/extensions.py (register Flask-Limiter), "
-        "and update tests/unit/test_auth.py with new test cases."
+        "and flaskbb/auth/forms.py (update login form if needed)."
     )
     task = append_history(task, "architect_agent", "plan written, 4 files scoped (stub)", True)
     task["current_agent"] = "coding_agent"
     return task
 
 
+def _parse_new_files(plan: str) -> set:
+    """
+    Extract paths declared with 'NEW FILE: <path>' from the Architect's plan.
+    Returns a set of path strings (stripped).
+    """
+    new_files = set()
+    if not plan:
+        return new_files
+    for line in plan.splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("NEW FILE:"):
+            path = stripped[len("NEW FILE:"):].strip()
+            if path:
+                new_files.add(path)
+    return new_files
+
+
+def _validate_architect_output(task: dict) -> str:
+    """
+    Validate that the Architect's scoped_files and NEW FILE: declarations are
+    consistent with the state of disk.
+
+    Returns an error string if an Architect error is detected, or "" if clean.
+
+    Rules (from docs/agent-conventions.md):
+      1. Any scoped_file that does not exist on disk must be declared NEW FILE: in plan.
+      2. Every NEW FILE: path must also appear in scoped_files.
+      3. A NEW FILE: path must NOT already exist on disk.
+    """
+    scoped_files = task.get("scoped_files", [])
+    plan = task.get("plan") or ""
+    new_file_set = _parse_new_files(plan)
+
+    # Resolve paths relative to sample_repo root.
+    # Read REPO_ROOT from module globals at call time so tests can monkeypatch it.
+    import orchestration.pipeline as _self
+    sample_repo_root = os.path.join(_self.REPO_ROOT, "sample_repo", "flaskbb")
+
+    # Rule 1: scoped file missing from disk but not declared NEW FILE
+    for path in scoped_files:
+        abs_path = os.path.join(sample_repo_root, path)
+        if not os.path.exists(abs_path) and path not in new_file_set:
+            return (
+                f"scoped file does not exist on disk and is not declared NEW FILE: '{path}' "
+                "— Architect error (add 'NEW FILE: <path>' to plan, or fix the path)"
+            )
+
+    # Rule 2: NEW FILE path not in scoped_files
+    for path in new_file_set:
+        if path not in scoped_files:
+            return (
+                f"NEW FILE declared in plan but missing from scoped_files: '{path}' "
+                "— Architect error (add the path to scoped_files)"
+            )
+
+    # Rule 3: NEW FILE path already exists on disk
+    for path in new_file_set:
+        abs_path = os.path.join(sample_repo_root, path)
+        if os.path.exists(abs_path):
+            return (
+                f"NEW FILE declared for a path that already exists on disk: '{path}' "
+                "— Architect error (remove NEW FILE: prefix or use a different path)"
+            )
+
+    return ""
+
+
 def call_coding_agent(task: dict) -> dict:
     """
     Coding Agent: implements the plan, produces a code diff.
     STUB -- replace with real Bob call when Person B's Coding Agent is ready.
+
+    Before implementing, validates Architect output against docs/agent-conventions.md:
+    - scoped_files paths must exist OR be declared NEW FILE: in plan
+    - NEW FILE: paths must be in scoped_files and must not already exist on disk
+    If validation fails, the task is blocked immediately and routed to Manager Agent.
     """
-    print("[coding_agent] STUB: implementing code changes...")
     task["current_agent"] = "coding_agent"
+
+    # -- Pre-implementation validation (cross-agent convention Section 3) --------
+    arch_error = _validate_architect_output(task)
+    if arch_error:
+        print(f"[coding_agent] BLOCKED — Architect error detected: {arch_error}")
+        task["status"] = "blocked"
+        task["current_agent"] = "manager_agent"
+        task = append_history(
+            task,
+            "coding_agent",
+            f"blocked: {arch_error}",
+            None,  # success: null — this agent was blocked, not failed
+        )
+        return task
+
+    # -- Normal stub implementation ----------------------------------------------
+    print("[coding_agent] STUB: implementing code changes...")
 
     # Stub: realistic diff against FlaskBB auth views
     task["code_diff"] = (
@@ -412,6 +505,14 @@ def run_pipeline(feature_request: str, task_id: str = None) -> dict:
         print_stage(f"Coding Agent (attempt {task['retry_count'] + 1})", task)
         task = call_coding_agent(task)
         validate_task(task, "post-coding_agent")
+
+        # Architect error detected by Coding Agent — skip loop, go straight to Manager
+        if task["status"] == "blocked":
+            print(
+                "\n[pipeline] ! Coding Agent blocked due to Architect error. "
+                "Skipping Testing/Review — routing straight to Manager Agent."
+            )
+            break
 
         print_stage(f"Testing Agent (attempt {task['retry_count'] + 1})", task)
         task = call_testing_agent(task)

@@ -97,6 +97,8 @@ def test_retry_cap_blocks_at_max_retries(monkeypatch, tmp_path):
     # Redirect file outputs to temp dir
     monkeypatch.setattr(pipeline, "STATS_PATH", str(tmp_path / "agent_stats.json"))
     monkeypatch.setattr(pipeline, "RUN_HISTORY_PATH", str(tmp_path / "run_history.json"))
+    # Never call the real watsonx API from tests — stub out reflection
+    monkeypatch.setattr(pipeline.reflection_module, "run_reflection", lambda report: [])
 
     # Make review always fail
     def failing_review(task):
@@ -214,3 +216,136 @@ def test_validate_task_prints_warning_on_invalid(capsys, monkeypatch):
     # Either a warning was printed, or jsonschema isn't available — both are acceptable
     # The key assertion is that no exception was raised
     assert True  # reaching here means no exception
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-agent conventions — Architect validation & blocked routing
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_parse_new_files_extracts_paths():
+    """_parse_new_files must return all NEW FILE: paths from a plan string."""
+    plan = "NEW FILE: flaskbb/middleware/rate_limit.py\nSome other text.\nNEW FILE: tests/unit/test_rate_limit.py"
+    result = pipeline._parse_new_files(plan)
+    assert "flaskbb/middleware/rate_limit.py" in result
+    assert "tests/unit/test_rate_limit.py" in result
+
+
+def test_parse_new_files_empty_plan():
+    assert pipeline._parse_new_files("") == set()
+    assert pipeline._parse_new_files(None) == set()
+
+
+def test_parse_new_files_case_insensitive_prefix():
+    """'new file:' (lowercase) should also be recognised."""
+    plan = "new file: some/new/file.py"
+    result = pipeline._parse_new_files(plan)
+    assert "some/new/file.py" in result
+
+
+def test_coding_agent_blocked_on_nonexistent_scoped_file(monkeypatch, tmp_path):
+    """
+    If a scoped_file doesn't exist on disk and isn't declared NEW FILE:,
+    call_coding_agent must set status=blocked and append success=null history.
+    """
+    monkeypatch.setattr(pipeline, "STATS_PATH", str(tmp_path / "agent_stats.json"))
+    monkeypatch.setattr(pipeline, "RUN_HISTORY_PATH", str(tmp_path / "run_history.json"))
+
+    # Point sample_repo_root at tmp_path so no files exist there
+    import orchestration.pipeline as pl
+    monkeypatch.setattr(pl, "REPO_ROOT", str(tmp_path))
+    # (tmp_path/sample_repo/flaskbb/ does not exist → all paths fail existence check)
+
+    task = pipeline.initialize_task("Test feature", task_id="test_blocked_arch")
+    task["scoped_files"] = ["flaskbb/auth/views.py"]  # doesn't exist under tmp_path
+    task["plan"] = "Just a plan with no NEW FILE declaration."
+
+    task = pipeline.call_coding_agent(task)
+
+    assert task["status"] == "blocked"
+    assert task["current_agent"] == "manager_agent"
+    # History entry must exist with success=None
+    coding_entries = [e for e in task["history"] if e["agent"] == "coding_agent"]
+    assert len(coding_entries) == 1
+    assert coding_entries[0]["success"] is None
+    assert "blocked" in coding_entries[0]["output_summary"]
+    assert "Architect error" in coding_entries[0]["output_summary"]
+
+
+def test_coding_agent_blocked_new_file_not_in_scoped_files(monkeypatch, tmp_path):
+    """NEW FILE: declared in plan but missing from scoped_files → Architect error."""
+    import orchestration.pipeline as pl
+    monkeypatch.setattr(pl, "REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(pipeline, "STATS_PATH", str(tmp_path / "agent_stats.json"))
+    monkeypatch.setattr(pipeline, "RUN_HISTORY_PATH", str(tmp_path / "run_history.json"))
+
+    task = pipeline.initialize_task("Test feature", task_id="test_new_file_not_scoped")
+    task["scoped_files"] = []  # new file NOT listed here
+    task["plan"] = "NEW FILE: flaskbb/new_module.py\nDo something."
+
+    task = pipeline.call_coding_agent(task)
+
+    assert task["status"] == "blocked"
+    coding_entries = [e for e in task["history"] if e["agent"] == "coding_agent"]
+    assert coding_entries[0]["success"] is None
+    assert "Architect error" in coding_entries[0]["output_summary"]
+
+
+def test_coding_agent_blocked_new_file_already_exists(monkeypatch, tmp_path):
+    """NEW FILE: declared for a path that already exists on disk → Architect error."""
+    import orchestration.pipeline as pl
+
+    # Create the file so it "already exists"
+    sample_root = tmp_path / "sample_repo" / "flaskbb"
+    sample_root.mkdir(parents=True)
+    existing = sample_root / "existing_module.py"
+    existing.write_text("# exists")
+
+    monkeypatch.setattr(pl, "REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(pipeline, "STATS_PATH", str(tmp_path / "agent_stats.json"))
+    monkeypatch.setattr(pipeline, "RUN_HISTORY_PATH", str(tmp_path / "run_history.json"))
+
+    task = pipeline.initialize_task("Test feature", task_id="test_overwrite")
+    task["scoped_files"] = ["existing_module.py"]
+    task["plan"] = "NEW FILE: existing_module.py\nDo something."
+
+    task = pipeline.call_coding_agent(task)
+
+    assert task["status"] == "blocked"
+    coding_entries = [e for e in task["history"] if e["agent"] == "coding_agent"]
+    assert coding_entries[0]["success"] is None
+
+
+def test_pipeline_routes_blocked_task_straight_to_manager(monkeypatch, tmp_path):
+    """When Coding Agent returns status=blocked, Testing/Review must be skipped."""
+    monkeypatch.setattr(pipeline, "STATS_PATH", str(tmp_path / "agent_stats.json"))
+    monkeypatch.setattr(pipeline, "RUN_HISTORY_PATH", str(tmp_path / "run_history.json"))
+    import orchestration.pipeline as pl
+    monkeypatch.setattr(pl, "REPO_ROOT", str(tmp_path))  # forces all scoped_files to fail
+
+    testing_called = []
+    review_called = []
+
+    def fake_testing(task):
+        testing_called.append(True)
+        return task
+
+    def fake_review(task):
+        review_called.append(True)
+        return task
+
+    monkeypatch.setattr(pipeline, "call_testing_agent", fake_testing)
+    monkeypatch.setattr(pipeline, "call_review_agent", fake_review)
+
+    task = pipeline.run_pipeline("Blocked architect test", task_id="test_route_blocked")
+
+    assert task["status"] == "blocked"
+    assert len(testing_called) == 0, "Testing Agent must NOT be called when Coding is blocked"
+    assert len(review_called) == 0, "Review Agent must NOT be called when Coding is blocked"
+
+
+def test_append_history_accepts_none_success():
+    """append_history must accept success=None (maps to JSON null)."""
+    task = make_fresh_task()
+    task = pipeline.append_history(task, "coding_agent", "blocked: architect error", None)
+    assert task["history"][0]["success"] is None
+
