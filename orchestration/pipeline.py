@@ -1,4 +1,4 @@
-"""
+﻿"""
 pipeline.py -- AI Dev Team orchestration pipeline
 Calls agents in sequence: PM -> Architect -> Coding -> Testing -> Review -> Manager -> (Reflection)
 Each agent call is an isolated function that takes a task dict and returns an updated task dict.
@@ -193,23 +193,22 @@ def call_coding_agent(task: dict) -> dict:
 
 def call_testing_agent(task: dict) -> dict:
     """
-    Testing Agent: runs tests against the code diff and acceptance criteria.
-    STUB -- replace with real Bob call when Person C's Testing Agent is ready.
+    Testing Agent: applies the code diff to a temp copy of the FlaskBB repo,
+    runs the pytest suite, and asks the model to reason about acceptance criteria
+    coverage using real test output as evidence.
+
+    Requires FLASKBB_REPO_PATH env var pointing at the FlaskBB repo root.
     """
-    print("[testing_agent] STUB: running tests...")
-    task["current_agent"] = "testing_agent"
+    import os
+    from agents.testing_agent.testing_agent import run_testing_agent
 
-    # Stub: all criteria matched, no failures
-    task["test_results"] = {
-        "passed": True,
-        "criteria_matched": task["acceptance_criteria"][:],
-        "failures": [],
-    }
-    task = append_history(task, "testing_agent", "tests passed (stub)", True)
-    task["current_agent"] = "review_agent"
-    return task
-
-
+    repo_path = os.environ.get("FLASKBB_REPO_PATH", "")
+    if not repo_path:
+        raise EnvironmentError(
+            "FLASKBB_REPO_PATH is not set. "
+            "Point it to the FlaskBB sample repo root before running the pipeline."
+        )
+    return run_testing_agent(task, repo_path=repo_path)
 def call_review_agent(task: dict) -> dict:
     """
     Review Agent: reviews the code diff against the security checklist.
