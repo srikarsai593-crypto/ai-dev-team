@@ -20,7 +20,7 @@ Tests cover:
 
 import copy
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -180,7 +180,7 @@ class TestValidateCriteriaMatched:
 
 
 # ---------------------------------------------------------------------------
-# 4. Diff failure → coding_agent attribution
+# 4. Diff failure → coding_agent attribution (includes None diff guard)
 # ---------------------------------------------------------------------------
 
 MODULE = "agents.testing_agent.testing_agent"
@@ -232,6 +232,93 @@ class TestDiffFailureAttribution:
         ]
         assert "coding_agent" in new_failure_agents
         assert "testing_agent" not in new_failure_agents
+
+
+# ---------------------------------------------------------------------------
+# 4c. None / empty code_diff → coding_agent attribution (no apply attempted)
+# ---------------------------------------------------------------------------
+
+
+class TestNullDiffGuard:
+    def test_none_diff_attributed_to_coding_agent(self):
+        """
+        When code_diff is None, run_testing_agent must attribute the failure
+        to coding_agent (not testing_agent) without even attempting apply_diff.
+        """
+        task = _task()
+        task["code_diff"] = None
+
+        # apply_diff_to_temp_copy must NOT be called at all
+        with patch(f"{MODULE}.apply_diff_to_temp_copy") as mock_apply:
+            result = run_testing_agent(task, repo_path="/fake/repo")
+            mock_apply.assert_not_called()
+
+        new_coding_failures = [
+            h for h in result["history"]
+            if h["agent"] == "coding_agent" and h["success"] is False
+        ]
+        assert len(new_coding_failures) == 1
+        assert "null or empty" in new_coding_failures[0]["output_summary"]
+
+        testing_entries = [h for h in result["history"] if h["agent"] == "testing_agent"]
+        assert len(testing_entries) == 0
+
+        assert result["status"] == "blocked"
+        assert result["current_agent"] == "manager_agent"
+
+    def test_empty_string_diff_attributed_to_coding_agent(self):
+        """Empty string code_diff is treated the same as None."""
+        task = _task()
+        task["code_diff"] = ""
+
+        with patch(f"{MODULE}.apply_diff_to_temp_copy") as mock_apply:
+            result = run_testing_agent(task, repo_path="/fake/repo")
+            mock_apply.assert_not_called()
+
+        new_coding_failures = [
+            h for h in result["history"]
+            if h["agent"] == "coding_agent" and h["success"] is False
+        ]
+        assert len(new_coding_failures) == 1
+
+
+# ---------------------------------------------------------------------------
+# 4d. retry_count and other task fields preserved through the agent
+# ---------------------------------------------------------------------------
+
+
+class TestTaskFieldPreservation:
+    def _run_with_retry_count(self, retry_count: int) -> dict:
+        task = _task()
+        task["retry_count"] = retry_count
+        with (
+            patch(f"{MODULE}.apply_diff_to_temp_copy", return_value="/tmp/fake_repo"),
+            patch(f"{MODULE}.run_repo_test_suite", return_value=_GOOD_TEST_OUTPUT),
+            patch(f"{MODULE}.call_bob_testing",
+                  return_value=_PASSED_BOB_RESPONSE["test_results"]),
+            patch(f"{MODULE}.shutil.rmtree"),
+        ):
+            return run_testing_agent(task, repo_path="/fake/repo")
+
+    def test_retry_count_zero_preserved(self):
+        """retry_count=0 must pass through unchanged."""
+        result = self._run_with_retry_count(0)
+        assert result["retry_count"] == 0
+
+    def test_retry_count_nonzero_preserved(self):
+        """retry_count=1 (second attempt) must pass through unchanged."""
+        result = self._run_with_retry_count(1)
+        assert result["retry_count"] == 1
+
+    def test_task_id_preserved(self):
+        """task_id must never be mutated by the testing agent."""
+        result = self._run_with_retry_count(0)
+        assert result["task_id"] == "task_001"
+
+    def test_acceptance_criteria_preserved(self):
+        """acceptance_criteria list must not be modified."""
+        result = self._run_with_retry_count(0)
+        assert result["acceptance_criteria"] == ACCEPTANCE_CRITERIA
 
 
 # ---------------------------------------------------------------------------

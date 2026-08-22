@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,18 @@ def _load_schema() -> dict:
 
 
 _TASK_SCHEMA = _load_schema()
+
+# System prompt cached at import time — no repeated disk reads per LLM call.
+_SYSTEM_PROMPT: str | None = None
+
+
+def _get_system_prompt() -> str:
+    global _SYSTEM_PROMPT
+    if _SYSTEM_PROMPT is None:
+        prompt_path = Path(__file__).parent / "system_prompt.md"
+        with open(prompt_path, "r", encoding="utf-8") as fh:
+            _SYSTEM_PROMPT = fh.read()
+    return _SYSTEM_PROMPT
 
 
 def validate_task(task: dict) -> None:
@@ -62,7 +75,7 @@ def _run_pytest(repo_path: str) -> dict:
     json_report_path = os.path.join(repo_path, ".pytest_report.json")
     result = subprocess.run(
         [
-            "python", "-m", "pytest",
+            sys.executable, "-m", "pytest",
             "--tb=short", "-q",
             f"--json-report-file={json_report_path}",
             "--json-report",
@@ -144,13 +157,41 @@ def _get_baseline(repo_path: str) -> dict:
 
 def apply_diff_to_temp_copy(code_diff: str, repo_path: str) -> str:
     """
-    Copy *repo_path* to a temp directory, apply *code_diff* using ``git apply``
-    (falling back to ``patch -p1``), and return the temp directory path.
+    Copy *repo_path* to a temp directory, initialise a bare git repo there,
+    apply *code_diff* using ``git apply`` (falling back to ``patch -p1``),
+    and return the temp directory path.
 
+    Raises ValueError  if *code_diff* is None or empty.
     Raises RuntimeError if the diff does not apply cleanly.
     """
+    if not code_diff:
+        raise ValueError("code_diff is None or empty — nothing to apply")
+
     temp_dir = tempfile.mkdtemp(prefix="testing_agent_")
-    shutil.copytree(repo_path, temp_dir, dirs_exist_ok=True)
+    # Copy repo files (exclude .git so we start fresh)
+    shutil.copytree(
+        repo_path,
+        temp_dir,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(".git"),
+    )
+
+    # Initialise a fresh git repo so `git apply` works without needing the
+    # original remote; stage all files so the index matches the working tree.
+    subprocess.run(["git", "init"], cwd=temp_dir, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "testing_agent@pipeline"],
+        cwd=temp_dir, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Testing Agent"],
+        cwd=temp_dir, capture_output=True, check=True,
+    )
+    subprocess.run(["git", "add", "-A"], cwd=temp_dir, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "baseline", "--allow-empty"],
+        cwd=temp_dir, capture_output=True, check=True,
+    )
 
     # Write diff to a temp file
     diff_file = os.path.join(temp_dir, "_agent.patch")
@@ -219,11 +260,15 @@ def run_repo_test_suite(temp_repo_path: str, original_repo_path: str = "") -> di
             "error": None
         }
     """
-    baseline = _get_baseline(original_repo_path)
-    baseline_failed_set = set(baseline.get("failed_tests", []))
+    if not original_repo_path:
+        # No original repo provided — treat baseline as empty (no known failures)
+        baseline_failed_set: set[str] = set()
+    else:
+        baseline = _get_baseline(original_repo_path)
+        baseline_failed_set = set(baseline.get("failed_tests", []))
 
     run = _run_pytest(temp_repo_path)
-    new_failures = [t for t in run["failed_tests"] if t not in baseline_failed_set]
+    new_failures = [t for t in run["failed_tests"] if t not in baseline_failed_set]  # noqa: E501
 
     return {
         "applied": True,
@@ -242,12 +287,6 @@ def run_repo_test_suite(temp_repo_path: str, original_repo_path: str = "") -> di
 # ---------------------------------------------------------------------------
 
 
-def _load_system_prompt() -> str:
-    prompt_path = Path(__file__).parent / "system_prompt.md"
-    with open(prompt_path, "r", encoding="utf-8") as fh:
-        return fh.read()
-
-
 def call_bob_testing(task: dict, actual_test_output: dict) -> dict:
     """
     Call the Bob (OpenAI-compatible) API with the task and real pytest output.
@@ -264,7 +303,7 @@ def call_bob_testing(task: dict, actual_test_output: dict) -> dict:
             "Export it before running the Testing Agent."
         )
 
-    system_prompt = _load_system_prompt()
+    system_prompt = _get_system_prompt()
     user_payload = json.dumps(
         {"task": task, "actual_test_output": actual_test_output}, indent=2
     )
@@ -358,6 +397,19 @@ def run_testing_agent(task: dict, repo_path: str) -> dict:
     acceptance_criteria = task.get("acceptance_criteria", [])
 
     # ── (a) Apply diff ───────────────────────────────────────────────────────
+    # Guard: if code_diff is None/empty the Coding Agent produced nothing —
+    # attribute as a coding_agent failure before attempting anything else.
+    if not code_diff:
+        _append_history(
+            task,
+            "coding_agent",
+            "code_diff is null or empty — Coding Agent produced no diff",
+            False,
+        )
+        task["status"] = "blocked"
+        task["current_agent"] = "manager_agent"
+        return task
+
     temp_path = None
     try:
         temp_path = apply_diff_to_temp_copy(code_diff, repo_path)
